@@ -12,6 +12,9 @@ import subprocess
 import cv2
 from datetime import datetime
 
+#from modules import BasicConvLSTMCell
+#from modules.model_flownet import *
+#from modules.model_easyflow import *
 from modules.videosr_ops import *
 from modules.utils import *
 from modules.SSIM_Index import *
@@ -20,6 +23,11 @@ import modules.ps
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
+#os.environ["CUDA_VISIBLE_DEVICES"]=str(np.argmax( [int(x.split()[2]) for x in subprocess.Popen("nvidia-smi -q -d Memory | grep -A4 GPU | grep Free", shell=True, stdout=subprocess.PIPE).stdout.readlines()]))
+'''
+特征层减半，增加block个数
+学习率前10000步从1e-3到2e-4，之后基本与原始一致
+'''
 DATA_TEST = './data/test/calendar'
 DATA_TRAIN = './data/train/'
 
@@ -49,7 +57,7 @@ class VIDEOSR(object):
         self.max_steps = int(1e6)
         self.batch_size = 16
         self.eval_batch_size=10
-        self.ratio = 0.25
+        self.ratio = 1.0
         self.lstm_loss_weight = np.linspace(0.5, 1.0, self.num_frames)
         self.lstm_loss_weight = self.lstm_loss_weight / np.sum(self.lstm_loss_weight)
         self.learning_rate = 1e-3
@@ -122,6 +130,7 @@ class VIDEOSR(object):
         num_batch, num_frame, height, width, num_channels = frames_lr.get_shape().as_list()
         out_height = height * self.scale_factor
         out_width = width * self.scale_factor
+        # calculate flow
         idx0 = num_frame // 2
         frames_y = frames_lr
         frame_ref_y = frames_y[:, int(idx0), :, :, :]
@@ -133,6 +142,9 @@ class VIDEOSR(object):
         tf.summary.image('bic', im2uint8(frame_bic_ref), max_outputs=3)
 
         x_unwrap = []
+        '''with tf.variable_scope('LSTM'):
+            cell = BasicConvLSTMCell.BasicConvLSTMCell([out_height // self.scale_factor, out_width // self.scale_factor], [3, 3], 64)
+            rnn_state = cell.zero_state(batch_size=num_batch, dtype=tf.float32)'''
         def Global_avg_pooling(x):
             return global_avg_pool(x, name='Global_avg_pooling')
         
@@ -166,9 +178,14 @@ class VIDEOSR(object):
                     conv1 = slim.conv2d(conv0, max_feature+max_feature//2, [3, 3], scope='enc1')
 
                     resblock_in1 = conv1
-
+                    #slice0 = tf.slice(conv1, [0,0,0,0], [num_batch, height, width, max_feature//slice_ratio])
+                    #resblock_in1 = tf.slice(conv1, [0,0,0,max_feature//slice_ratio], [num_batch, height, width, max_feature-max_feature//slice_ratio])
+                    #slice0 = tf.slice(conv1, [0,0,0,0], [num_batch, height, width, max_feature(1-slice_ratio)])
+                    #resblock_in1 = conv1
                     reuse_block=False
-                    for p in range(15):
+                    for p in range(15):#11.5个64x64x3x3 加上SE块P=10
+                        # with tf.variable_scope('srmodel_resblock1', reuse=reuse_resblock1) as scope_sr_resblock1:
+                        
                         with tf.variable_scope('srmodel_block', reuse=reuse_block) as scope_sr_block:
                             #000
                             conv0_0=slim.conv2d(resblock_in1, max_feature, [3, 3], scope='conv0_0_{}'.format(p))
@@ -193,9 +210,36 @@ class VIDEOSR(object):
                                 
                             block_out1 = tf.concat([conv0_1,conv1_1,conv2_1],3)
                             block_out1 = slim.conv2d(block_out1, max_feature+max_feature//2, [1, 1], scope='blockout_{}'.format(p))
+                            #slice = tf.slice(block_out1, [0,0,0,0], [num_batch, height, width, max_feature//slice_ratio])
+                            #slice0 = tf.concat([slice, slice0],3)
+                            #slice0 = slice + slice0
+                            #block_out = tf.slice(block_out1, [0,0,0,max_feature//slice_ratio], [num_batch, height, width, (max_feature-max_feature//slice_ratio)])#max_feature
                             resblock_in1 +=block_out1
+                    # SE BLOCK 6个3x3x64x64
+                    '''trans_1 = slim.conv2d(slice0, max_feature-max_feature//slice_ratio, [3, 3], scope='trans1_{}'.format(p))
+                    #trans_2 = slim.conv2d(trans_1, max_feature, [3, 3], scope='trans2_{}'.format(p))
+                    trans = slim.conv2d(trans_1, max_feature*4, [3, 3], scope='trans3_{}'.format(p))
+                    excitation3 = Global_avg_pooling(trans)
+                    excitation = tf.reshape(excitation3, [-1, 1, 1, max_feature*4])
+                    excitation = slim.conv2d(excitation, max_feature, [1, 1], scope='bot_net1_{}'.format(p))
+                    excitation = slim.conv2d(excitation, max_feature*4, [1, 1], scope='bot_net2_{}'.format(p))
+                    excitation = tf.nn.sigmoid(excitation)
+                    excitation = excitation*trans
+                    excitation = slim.conv2d(excitation, max_feature-max_feature//slice_ratio, [1, 1], scope='trans4_{}'.format(p))
+                    resblock_in1 = excitation + resblock_in1 + trans_1'''
+                    #trans = tf.reshape(trans, (-1, 1, 1, height*weight*filter_num*4))
+                    #trans = flatten_layer(trans)
+                    #trans = full_connection_layer(trans, 1024)
+                    #trans = tf.reshape(trans, (-1, 1, 1, height*weight*filter_num*4))
+                    #conv6 = slim.conv2d(resblock_in1, max_feature, [3, 3], scope='conv6')
+                    #large = modules.ps._PS(conv6, 2, max_feature//4)
                     if self.scale_factor==2 or self.scale_factor==3:
                         conv7 = slim.conv2d(resblock_in1, max_feature, [3, 3], scope='conv7')
+                        #larger = modules.ps._PS(conv7, 2, max_feature//4)
+                        
+                        
+                        #conv8= slim.conv2d(larger, max_feature, [3, 3], scope='conv8')
+                        #conv9=slim.conv2d(conv8, 48, [1, 1], scope='conv9')
                         rnn_out = slim.conv2d(conv7, (self.scale_factor**2)*3, [3, 3], activation_fn=None, scope='rnn_out')
                         
                         rnn_out = modules.ps._PS(rnn_out, 2, 3)
@@ -216,6 +260,8 @@ class VIDEOSR(object):
 
         x_unwrap = tf.stack(x_unwrap, 1)
         #x_unwrap = tf.gather(x_unwrap, indices=[0, 2, 1], axis=1)
+        #self.uv = tf.stack(self.uv, 1)
+        #self.uv = tf.gather(self.uv,indices=[0,2,1],axis=1)
         return x_unwrap
 
     def build_model(self):
@@ -236,6 +282,9 @@ class VIDEOSR(object):
 
         self.loss_mse = tf.reduce_sum(mse * self.lstm_loss_weight)
         tf.summary.scalar('loss_mse', self.loss_mse)
+
+
+        #tf.summary.image('uv', flowToColor(self.uv[0, :, :, :, :], maxflow=3.0), max_outputs=3)
 
         # total loss
         self.loss = self.loss_mse
@@ -423,6 +472,8 @@ class VIDEOSR(object):
             if step % 500 == 499 or (step + 1) == self.max_steps:
                 checkpoint_path = os.path.join(self.train_dir, 'checkpoints')
                 self.save(sess, checkpoint_path, step)
+                #if step<10000 or step>20000:
+                    #self.flownets.save(sess, './easyflow_log/model1/checkpoints', step)
 
     def save(self, sess, checkpoint_dir, step):
         model_name = "videoSR.model"

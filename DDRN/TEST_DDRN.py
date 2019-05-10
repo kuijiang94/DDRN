@@ -12,6 +12,9 @@ import subprocess
 import cv2
 from datetime import datetime
 
+#from modules import BasicConvLSTMCell
+#from modules.model_flownet import *
+#from modules.model_easyflow import *
 from modules.videosr_ops import *
 from modules.utils import *
 from modules.SSIM_Index import *
@@ -20,8 +23,13 @@ import modules.ps
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-#DATA_TEST = './data/test/calendar'
-#DATA_TRAIN = './data/train/'
+#os.environ["CUDA_VISIBLE_DEVICES"]=str(np.argmax( [int(x.split()[2]) for x in subprocess.Popen("nvidia-smi -q -d Memory | grep -A4 GPU | grep Free", shell=True, stdout=subprocess.PIPE).stdout.readlines()]))
+'''
+特征层减半，增加block个数
+学习率前10000步从1e-3到2e-4，之后基本与原始一致
+'''
+DATA_TEST = './data/test/calendar'
+DATA_TRAIN = './data/train/'
 
 
 def weight_loader(model_weights=None, tfvars=None):
@@ -61,6 +69,11 @@ class VIDEOSR(object):
         self.pathlist = open('./data/filelist_train.txt', 'rt').read().splitlines()
         random.shuffle(self.pathlist)
         self.vallist = open('./data/filelist_val.txt', 'rt').read().splitlines()
+
+        # flownets is a object of class FLOWNETS
+        #self.flownets = EASYFLOW()
+        # self.flownets = FLOWNETS(device='/gpu:0')
+        # self.srcnn_weights = np.load('srcnn.npy').tolist()
 
     def input_producer(self, batch_size=16):
         def read_data():
@@ -129,18 +142,25 @@ class VIDEOSR(object):
         tf.summary.image('bic', im2uint8(frame_bic_ref), max_outputs=3)
 
         x_unwrap = []
+        '''with tf.variable_scope('LSTM'):
+            cell = BasicConvLSTMCell.BasicConvLSTMCell([out_height // self.scale_factor, out_width // self.scale_factor], [3, 3], 64)
+            rnn_state = cell.zero_state(batch_size=num_batch, dtype=tf.float32)'''
         def Global_avg_pooling(x):
             return global_avg_pool(x, name='Global_avg_pooling')
         
         def Sigmoid(x) :
             return tf.nn.sigmoid(x)
+        #self.uv = []
 
         #frames_y = tf.gather(frames_y, indices=[0, 2, 1], axis=1)
         for i in range(num_frame):
             if i > 0 and not reuse:
                 reuse = True
             frame_i = frames_y[:, i, :, :, :]
+            #self.uv.append(frame_i)
             print('Build model - frame_{}'.format(i), frame_i.get_shape())
+            # frame_i_bw = imwarp_backward(uv, frame_ref_y, [height, width])
+            # frame_i_W = tf.exp(-tf.abs(frame_i_bw - frame_i) * 5)
             frame_i_fw = frame_i
             max_feature=64
             slice_ratio=self.ratio
@@ -158,8 +178,14 @@ class VIDEOSR(object):
                     conv1 = slim.conv2d(conv0, max_feature+max_feature//2, [3, 3], scope='enc1')
 
                     resblock_in1 = conv1
+                    #slice0 = tf.slice(conv1, [0,0,0,0], [num_batch, height, width, max_feature//slice_ratio])
+                    #resblock_in1 = tf.slice(conv1, [0,0,0,max_feature//slice_ratio], [num_batch, height, width, max_feature-max_feature//slice_ratio])
+                    #slice0 = tf.slice(conv1, [0,0,0,0], [num_batch, height, width, max_feature(1-slice_ratio)])
+                    #resblock_in1 = conv1
                     reuse_block=False
-                    for p in range(15):
+                    for p in range(15):#11.5个64x64x3x3 加上SE块P=10
+                        # with tf.variable_scope('srmodel_resblock1', reuse=reuse_resblock1) as scope_sr_resblock1:
+                        
                         with tf.variable_scope('srmodel_block', reuse=reuse_block) as scope_sr_block:
                             #000
                             conv0_0=slim.conv2d(resblock_in1, max_feature, [3, 3], scope='conv0_0_{}'.format(p))
@@ -184,9 +210,36 @@ class VIDEOSR(object):
                                 
                             block_out1 = tf.concat([conv0_1,conv1_1,conv2_1],3)
                             block_out1 = slim.conv2d(block_out1, max_feature+max_feature//2, [1, 1], scope='blockout_{}'.format(p))
+                            #slice = tf.slice(block_out1, [0,0,0,0], [num_batch, height, width, max_feature//slice_ratio])
+                            #slice0 = tf.concat([slice, slice0],3)
+                            #slice0 = slice + slice0
+                            #block_out = tf.slice(block_out1, [0,0,0,max_feature//slice_ratio], [num_batch, height, width, (max_feature-max_feature//slice_ratio)])#max_feature
                             resblock_in1 +=block_out1
+                    # SE BLOCK 6个3x3x64x64
+                    '''trans_1 = slim.conv2d(slice0, max_feature-max_feature//slice_ratio, [3, 3], scope='trans1_{}'.format(p))
+                    #trans_2 = slim.conv2d(trans_1, max_feature, [3, 3], scope='trans2_{}'.format(p))
+                    trans = slim.conv2d(trans_1, max_feature*4, [3, 3], scope='trans3_{}'.format(p))
+                    excitation3 = Global_avg_pooling(trans)
+                    excitation = tf.reshape(excitation3, [-1, 1, 1, max_feature*4])
+                    excitation = slim.conv2d(excitation, max_feature, [1, 1], scope='bot_net1_{}'.format(p))
+                    excitation = slim.conv2d(excitation, max_feature*4, [1, 1], scope='bot_net2_{}'.format(p))
+                    excitation = tf.nn.sigmoid(excitation)
+                    excitation = excitation*trans
+                    excitation = slim.conv2d(excitation, max_feature-max_feature//slice_ratio, [1, 1], scope='trans4_{}'.format(p))
+                    resblock_in1 = excitation + resblock_in1 + trans_1'''
+                    #trans = tf.reshape(trans, (-1, 1, 1, height*weight*filter_num*4))
+                    #trans = flatten_layer(trans)
+                    #trans = full_connection_layer(trans, 1024)
+                    #trans = tf.reshape(trans, (-1, 1, 1, height*weight*filter_num*4))
+                    #conv6 = slim.conv2d(resblock_in1, max_feature, [3, 3], scope='conv6')
+                    #large = modules.ps._PS(conv6, 2, max_feature//4)
                     if self.scale_factor==2 or self.scale_factor==3:
                         conv7 = slim.conv2d(resblock_in1, max_feature, [3, 3], scope='conv7')
+                        #larger = modules.ps._PS(conv7, 2, max_feature//4)
+                        
+                        
+                        #conv8= slim.conv2d(larger, max_feature, [3, 3], scope='conv8')
+                        #conv9=slim.conv2d(conv8, 48, [1, 1], scope='conv9')
                         rnn_out = slim.conv2d(conv7, (self.scale_factor**2)*3, [3, 3], activation_fn=None, scope='rnn_out')
                         
                         rnn_out = modules.ps._PS(rnn_out, 2, 3)
@@ -206,6 +259,9 @@ class VIDEOSR(object):
                     tf.get_variable_scope().reuse_variables()
 
         x_unwrap = tf.stack(x_unwrap, 1)
+        #x_unwrap = tf.gather(x_unwrap, indices=[0, 2, 1], axis=1)
+        #self.uv = tf.stack(self.uv, 1)
+        #self.uv = tf.gather(self.uv,indices=[0,2,1],axis=1)
         return x_unwrap
         
     def build_model(self):
@@ -459,8 +515,8 @@ class VIDEOSR(object):
                     time.sleep(5)
                     print(time.ctime())'''
                 dataPath = pat
-                #inList = sorted(glob.glob(os.path.join(dataPath, 'input{}/*.png').format(scale_factor)))
-                inList = sorted(glob.glob(os.path.join(dataPath, 'truth/*.png')))
+                inList = sorted(glob.glob(os.path.join(dataPath, 'input{}/*.png').format(scale_factor)))
+                #inList = sorted(glob.glob(os.path.join(dataPath, 'truth/*.png')))
                 inp = [scipy.misc.imread(i).astype(np.float32) / 255.0 for i in inList]
 
                 print('Testing path: {}'.format(dataPath))
@@ -529,8 +585,18 @@ class VIDEOSR(object):
                     # warp_err = tf.reduce_mean((self.frames_y - frames_ref_warp) ** 2, axis=4)
                     case_path = dataPath.split('/')[-1]
                     print('Testing - ', case_path, len(imgs))
+                    st_time=time.time()
                     [imgs_hr_rgb] = sess.run([output_rgb],feed_dict={frames_lr: imgs})
+                    ed_time=time.time()
+                    cost_time=ed_time-st_time
+                    print('spent {} s.'.format(cost_time))
 
+                    '''
+                    scipy.misc.imsave(os.path.join(DATA_TEST_OUT, 'y_%03d.png' % (idx0)),
+                                      im2uint8(imgs_hr[0, -1, :, :, 0]))
+                    for q in range(0, 3):
+                        scipy.misc.imsave(os.path.join(DATA_TEST_OUT, 'y_ff%03d_%01d.png' % (idx0, q)),
+                                          im2uint8(frame_fw[q, :, :, 0]))'''
                     if len(dims) == 3 and idx0==self.num_frames//2:
                         scipy.misc.imsave(os.path.join(path, 'rgb_%03d.png' % (file.index(pat))),
                                           im2uint8(imgs_hr_rgb[0, -1, :, :, :]))
@@ -545,7 +611,7 @@ def main(_):
     model = VIDEOSR()
     # model.train()
     # model.evaluation()
-    model.test('F:\\jiangkui\\shujuji\\wxtrain\\test30')
+    model.test('D:\\jiangkui\\shujuji\\wxtrain\\test30')
 
 
 if __name__ == '__main__':
